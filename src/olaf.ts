@@ -43,8 +43,20 @@ scene.add(aimDot);
 // --- Axe pool ---
 const AXE_POOL = [];
 const MAX_AXES = 16;
-const axeGeo = new THREE.BoxGeometry(0.18,0.08,0.7); // placeholder model
-const axeMat = new THREE.MeshStandardMaterial({color:0xbfc5c8, metalness:.7, roughness:.25});
+
+// Load texture
+const texLoader = new THREE.TextureLoader();
+const axeTex = texLoader.load("./assets/axe.png");
+
+// Make material (transparent so only axe shape shows)
+const axeMat = new THREE.MeshBasicMaterial({
+    map: axeTex,
+    transparent: true,
+    side: THREE.DoubleSide // so we see it from both sides
+});
+
+// Geometry (plane, size depends on your image aspect ratio)
+const axeGeo = new THREE.PlaneGeometry(0.639, 0.999); // width, height
 
 function getAxe(){
     let a = AXE_POOL.find(x => !x.userData.active);
@@ -63,6 +75,7 @@ function getAxe(){
     a.userData.vel = new THREE.Vector3();
     a.userData.prevPos = a.position.clone();
     a.userData.spin = new THREE.Vector3(THREE.MathUtils.randFloat(8,12), 0, 0);
+    //a.userData.spin = new THREE.Vector3(0, 10, 0); // spin around Y for a throwing effect
     return a;
 }
 
@@ -279,7 +292,7 @@ function tick(now=performance.now()){
         // Basic ballistic motion
         axe.userData.vel.y += GRAVITY * dt * 0.65;
         axe.position.addScaledVector(axe.userData.vel, dt);
-        axe.rotation.x += 10 * dt;
+        axe.rotation.z -= 6 * dt;
 
         // --- Target collision (check before ground) ---
         axeBox.setFromObject(axe);
