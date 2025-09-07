@@ -9,14 +9,14 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x19232b);
 
 const camera = new THREE.PerspectiveCamera(70, innerWidth/innerHeight, 0.1, 500);
-camera.position.set(0, 1.6, 0); // eye height of Olaf
+camera.position.set(0, 1.6, 0); // Olaf eye height
 
 // --- Lighting ---
 const dir = new THREE.DirectionalLight(0xffffff, 1.0); dir.position.set(3,6,2);
 const amb = new THREE.AmbientLight(0xffffff, .35);
 scene.add(dir, amb);
 
-// --- Ground plane (y = 0) ---
+// --- Ground (y = 0) ---
 const ground = new THREE.Mesh(
     new THREE.PlaneGeometry(600, 600),
     new THREE.MeshStandardMaterial({color:0x2f4f39})
@@ -24,27 +24,16 @@ const ground = new THREE.Mesh(
 ground.rotation.x = -Math.PI/2;
 ground.position.y = 0;
 scene.add(ground);
+const groundPlane = new THREE.Plane(new THREE.Vector3(0,1,0), 0); // for precise intersection
 
-// Plane object to compute intersection for ground hits
-const groundPlane = new THREE.Plane(new THREE.Vector3(0,1,0), 0); // y = 0
-
-// --- Decorative dummy targets (boxes in depth) ---
-const decoMat = new THREE.MeshStandardMaterial({color:0x8fb1d1, metalness:.1, roughness:.8});
-for (let i=0;i<20;i++){
-    const b = new THREE.Mesh(new THREE.BoxGeometry(0.6,0.6,0.6), decoMat.clone());
-    b.position.set(THREE.MathUtils.randFloatSpread(16), 0.9+Math.random()*1.2, -THREE.MathUtils.randFloat(12, 60));
-    b.material.color.offsetHSL(Math.random()*0.2-0.1, 0, 0);
-    scene.add(b);
-}
-
-// --- Aim plane & raycasting ---
-const aimPlaneZ = -24; // distance where the ray hits
+// --- Aim plane & raycasting (mouse → aim point in depth) ---
+const aimPlaneZ = -24;
 const aimPlane = new THREE.Plane(new THREE.Vector3(0,0,1), aimPlaneZ);
 const raycaster = new THREE.Raycaster();
-const ndc = new THREE.Vector2(0,0);
+const ndc = new THREE.Vector2();
 const aimPoint = new THREE.Vector3(0,1.6,aimPlaneZ);
 
-// Debug dot for aim intersection
+// Debug dot to visualize aim intersection
 const aimDot = new THREE.Mesh(
     new THREE.SphereGeometry(0.08),
     new THREE.MeshStandardMaterial({color:0xffffaa, emissive:0x222200})
@@ -54,7 +43,7 @@ scene.add(aimDot);
 // --- Axe pool ---
 const AXE_POOL = [];
 const MAX_AXES = 16;
-const axeGeo = new THREE.BoxGeometry(0.18,0.08,0.7);
+const axeGeo = new THREE.BoxGeometry(0.18,0.08,0.7); // placeholder model
 const axeMat = new THREE.MeshStandardMaterial({color:0xbfc5c8, metalness:.7, roughness:.25});
 
 function getAxe(){
@@ -69,27 +58,147 @@ function getAxe(){
     a.userData.active = true;
     a.visible = true;
     a.position.copy(camera.position);
-    a.position.y -= 0.2;
+    a.position.y -= 0.1;
     a.rotation.set(0,0,0);
     a.userData.vel = new THREE.Vector3();
-    a.userData.prevPos = a.position.clone(); // remember previous position for ground-cross detection
+    a.userData.prevPos = a.position.clone();
     a.userData.spin = new THREE.Vector3(THREE.MathUtils.randFloat(8,12), 0, 0);
     return a;
+}
+
+// --- Targets (simple boxes for now) ---
+const TARGETS = [];
+const targetGeo = new THREE.BoxGeometry(0.8, 0.8, 0.8);
+function makeTarget(){
+    const mat = new THREE.MeshStandardMaterial({ color: new THREE.Color().setHSL(Math.random(), 0.5, 0.6) });
+    const m = new THREE.Mesh(targetGeo, mat);
+    m.castShadow = true;
+    m.receiveShadow = true;
+    m.userData.alive = true;
+    m.userData.t = Math.random()*Math.PI*2; // phase for wobble
+    scene.add(m);
+    TARGETS.push(m);
+    randomizeTarget(m, true);
+    return m;
+}
+function randomizeTarget(t, initial=false){
+    // Spawn somewhere in front of the camera with slight randomness
+    t.position.set(
+        THREE.MathUtils.randFloatSpread(14),
+        0.9 + Math.random()*1.2,
+        -THREE.MathUtils.randFloat(12, 60)
+    );
+    t.scale.setScalar(1);
+    t.userData.alive = true;
+    t.visible = true;
+    if (!initial){
+        // give a small HSL nudge so respawns look varied
+        t.material.color.offsetHSL((Math.random()*0.2-0.1), 0, 0);
+    }
+}
+// Create a bunch of initial targets
+const TARGET_COUNT = 12;
+for (let i=0;i<TARGET_COUNT;i++) makeTarget();
+
+// --- Simple ground-hit FX (expanding ring) ---
+const FX_POOL = [];
+function createGroundRing(){
+    const ring = new THREE.Mesh(
+        new THREE.RingGeometry(0.15, 0.32, 48),
+        new THREE.MeshBasicMaterial({
+            color: 0xffffff,
+            transparent: true,
+            opacity: 0.9,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false
+        })
+    );
+    ring.rotation.x = -Math.PI/2;
+    ring.visible = false;
+    ring.userData.active = false;
+    ring.userData.t = 0;
+    scene.add(ring);
+    FX_POOL.push(ring);
+    return ring;
+}
+function spawnGroundHit(point){
+    let fx = FX_POOL.find(r => !r.userData.active) || createGroundRing();
+    fx.position.set(point.x, 0.01, point.z);
+    fx.scale.set(1,1,1);
+    fx.userData.t = 0;
+    fx.userData.active = true;
+    fx.visible = true;
+}
+function updateFX(dt){
+    for (const fx of FX_POOL){
+        if (!fx.userData.active) continue;
+        fx.userData.t += dt;
+        const life = 0.45;
+        const p = fx.userData.t / life;
+        fx.scale.setScalar(1 + p*5.0);
+        fx.material.opacity = 0.9 * (1 - p);
+        if (p >= 1){
+            fx.userData.active = false;
+            fx.visible = false;
+        }
+    }
+}
+
+// --- Simple target-hit FX (pop sphere) ---
+const POP_POOL = [];
+function createPop(){
+    const mesh = new THREE.Mesh(
+        new THREE.SphereGeometry(0.25, 16, 12),
+        new THREE.MeshBasicMaterial({
+            color: 0xffe066,
+            transparent: true,
+            opacity: 1,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false
+        })
+    );
+    mesh.visible = false;
+    mesh.userData.active = false;
+    mesh.userData.t = 0;
+    scene.add(mesh);
+    POP_POOL.push(mesh);
+    return mesh;
+}
+function spawnPop(point){
+    let fx = POP_POOL.find(p => !p.userData.active) || createPop();
+    fx.position.copy(point);
+    fx.scale.setScalar(1);
+    fx.userData.t = 0;
+    fx.userData.active = true;
+    fx.visible = true;
+}
+function updatePops(dt){
+    for (const fx of POP_POOL){
+        if (!fx.userData.active) continue;
+        fx.userData.t += dt;
+        const life = 0.35;
+        const p = fx.userData.t / life;
+        fx.scale.setScalar(1 + p*2.2);
+        fx.material.opacity = 1 - p;
+        if (p >= 1){
+            fx.userData.active = false;
+            fx.visible = false;
+        }
+    }
 }
 
 // --- Throw charging parameters ---
 const chargeBar = document.querySelector("#charge>i");
 let charging = false, tDown = 0;
 
-const CHARGE_MIN_MS = 60;       // min press time
-const CHARGE_MAX_MS = 900;      // max charge time
-const V0_MIN = 12;              // min throw speed
-const V0_MAX = 40;              // max throw speed
-const UP_BIAS = 0.12;           // adds upward force for arcade feel
+const CHARGE_MIN_MS = 60;
+const CHARGE_MAX_MS = 900;
+const V0_MIN = 12;
+const V0_MAX = 40;
+const UP_BIAS = 0.12;
 
 function screenToAim(x, y){
-    ndc.x =  (x / innerWidth) * 2 - 1;
-    ndc.y = -(y / innerHeight) * 2 + 1;
+    ndc.set((x/innerWidth)*2-1, -(y/innerHeight)*2+1);
     raycaster.setFromCamera(ndc, camera);
     const origin = raycaster.ray.origin;
     const dir = raycaster.ray.direction;
@@ -98,14 +207,14 @@ function screenToAim(x, y){
     aimDot.position.copy(aimPoint);
 }
 
-// --- Input: mouse ---
-addEventListener("mousemove", (e)=>screenToAim(e.clientX, e.clientY), {passive:true});
-addEventListener("pointerdown", (e)=>{
+// --- Input: mouse/touch ---
+addEventListener("mousemove", e => screenToAim(e.clientX, e.clientY), {passive:true});
+addEventListener("pointerdown", e => {
     charging = true;
     tDown = performance.now();
     screenToAim(e.clientX, e.clientY);
 });
-addEventListener("pointerup", (e)=>{
+addEventListener("pointerup", e => {
     if (!charging) return;
     charging = false;
     const held = Math.min(CHARGE_MAX_MS, Math.max(0, performance.now() - tDown));
@@ -121,7 +230,7 @@ addEventListener("pointerup", (e)=>{
     axe.userData.prevPos.copy(axe.position);
     axe.userData.vel.copy(dir).multiplyScalar(v0);
 
-    // small spread for non-perfect throws
+    // small spread so it doesn't feel like a laser
     const spread = 0.007;
     axe.userData.vel.x += (Math.random()*2-1)*v0*spread;
     axe.userData.vel.y += (Math.random()*2-1)*v0*spread;
@@ -129,57 +238,14 @@ addEventListener("pointerup", (e)=>{
     chargeBar.style.width = "0%";
 });
 
-// --- Score display (placeholder) ---
+// --- Score ---
 const scoreEl = document.getElementById("score");
 let score = 0;
-function addScore(n){ score+=n; scoreEl.textContent = String(score); }
+function addScore(n){ score += n; scoreEl.textContent = String(score); }
 
-// --- Simple ground-hit FX pool (expanding ring) ---
-const FX_POOL = [];
-function createGroundRing(){
-    // Ring that grows and fades; additive blending for a nice pop
-    const ring = new THREE.Mesh(
-        new THREE.RingGeometry(0.15, 0.32, 48),
-        new THREE.MeshBasicMaterial({
-            color: 0xffffff,
-            transparent: true,
-            opacity: 0.9,
-            blending: THREE.AdditiveBlending,
-            depthWrite: false
-        })
-    );
-    ring.rotation.x = -Math.PI/2; // face upward
-    ring.visible = false;
-    ring.userData.active = false;
-    ring.userData.t = 0;          // lifetime timer
-    scene.add(ring);
-    FX_POOL.push(ring);
-    return ring;
-}
-function spawnGroundHit(point){
-    // Reuse or create a ring
-    let fx = FX_POOL.find(r => !r.userData.active) || createGroundRing();
-    fx.position.set(point.x, 0.01, point.z); // slightly above ground to avoid z-fighting
-    fx.scale.set(1,1,1);
-    fx.userData.t = 0;
-    fx.userData.active = true;
-    fx.visible = true;
-}
-function updateFX(dt){
-    // Animate active rings (grow + fade over ~0.45s)
-    for (const fx of FX_POOL){
-        if (!fx.userData.active) continue;
-        fx.userData.t += dt;
-        const life = 0.45;
-        const p = fx.userData.t / life;
-        fx.scale.setScalar(1 + p*5.0);             // grow
-        fx.material.opacity = 0.9 * (1 - p);       // fade out
-        if (p >= 1){
-            fx.userData.active = false;
-            fx.visible = false;
-        }
-    }
-}
+// --- Collision helpers (AABB vs AABB) ---
+const axeBox = new THREE.Box3();
+const targetBox = new THREE.Box3();
 
 // --- Loop / physics ---
 const GRAVITY = -9.81;
@@ -195,30 +261,58 @@ function tick(now=performance.now()){
         chargeBar.style.width = (p*100).toFixed(1) + "%";
     }
 
-    // Update axe flight
+    // Idle wobble for alive targets
+    for (const t of TARGETS){
+        if (!t.userData.alive) continue;
+        t.userData.t += dt;
+        t.position.x += Math.sin(t.userData.t*2.0) * 0.002; // tiny wiggle
+        t.rotation.y += 0.01;
+    }
+
+    // Update axes
     for (const axe of AXE_POOL){
         if (!axe.userData.active) continue;
 
-        // Remember previous position for ground-cross detection
+        // Save previous position (for ground-cross check)
         axe.userData.prevPos.copy(axe.position);
 
-        // Gravity and motion
+        // Basic ballistic motion
         axe.userData.vel.y += GRAVITY * dt * 0.65;
         axe.position.addScaledVector(axe.userData.vel, dt);
         axe.rotation.x += 10 * dt;
 
-        // Detect crossing the ground plane (prev.y >= 0 and now < 0)
-        if (axe.userData.prevPos.y >= 0.0 && axe.position.y < 0.0){
-            // Intersect the motion segment with the ground plane for a precise hit point
+        // --- Target collision (check before ground) ---
+        axeBox.setFromObject(axe);
+        for (const tgt of TARGETS){
+            if (!tgt.userData.alive) continue;
+            targetBox.setFromObject(tgt);
+            if (axeBox.intersectsBox(targetBox)){
+                // Hit! deactivate axe, "remove" target, play FX, add score, schedule respawn
+                axe.userData.active = false;
+                axe.visible = false;
+
+                tgt.userData.alive = false;
+                tgt.visible = false;
+
+                spawnPop(tgt.position);
+                addScore(100);
+
+                // Respawn this target after a short delay
+                setTimeout(()=> randomizeTarget(tgt), 700);
+
+                // No need to check other targets for this axe
+                break;
+            }
+        }
+
+        // --- Ground hit detection (crossing y = 0) ---
+        if (axe.userData.active && axe.userData.prevPos.y >= 0.0 && axe.position.y < 0.0){
             const segment = new THREE.Line3(axe.userData.prevPos, axe.position);
             if (groundPlane.intersectLine(segment, tmpHit)){
                 spawnGroundHit(tmpHit);
             } else {
-                // Fallback: use current XZ with y=0
                 spawnGroundHit(new THREE.Vector3(axe.position.x, 0, axe.position.z));
             }
-
-            // Deactivate the axe after it hits the ground
             axe.userData.active = false;
             axe.visible = false;
             continue;
@@ -231,15 +325,16 @@ function tick(now=performance.now()){
         }
     }
 
-    // Update FX animations
+    // Update effects
     updateFX(dt);
+    updatePops(dt);
 
     renderer.render(scene, camera);
     requestAnimationFrame(tick);
 }
 requestAnimationFrame(tick);
 
-// --- Handle resize ---
+// --- Resize ---
 addEventListener("resize", ()=>{
     camera.aspect = innerWidth/innerHeight;
     camera.updateProjectionMatrix();
